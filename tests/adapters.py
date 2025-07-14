@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+from multiprocessing import Pool
 import os
+from pathlib import Path
+import regex as re
 from typing import IO, Any, BinaryIO
 from collections.abc import Iterable
 from jaxtyping import Float, Int
+from collections import Counter, defaultdict
 
 import numpy.typing as npt
 import torch
 from torch import Tensor
 
-
+from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 def run_linear(
     d_in: int,
@@ -561,6 +565,133 @@ def get_tokenizer(
     raise NotImplementedError
 
 
+def pre_tokenize(
+        filename: str | os.PathLike,
+        start: int,
+        end: int,
+        special_tokens: list[str] | None = None,
+    ) -> dict[tuple[bytes], int]:
+    """
+    Given a file, pre-tokenize it and return the words count.
+    """
+    words_count = {}
+    with open(filename, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+
+        # Before pre-tokenizing, stripe off the special tokens and split the file into docs.
+        pattern = "|".join(re.escape(tok) for tok in special_tokens)
+        docs = re.split(f"(?:{pattern})", chunk)
+        docs = [doc for doc in docs if doc]
+
+        PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        for doc in docs:
+            iterator = re.finditer(PAT, doc)
+            for match in iterator:
+                data = match.group()
+                data_bytes = data.encode('utf-8')
+                bytes_tuple = tuple(bytes([byte]) for byte in data_bytes)
+                if bytes_tuple not in words_count:
+                    words_count[bytes_tuple] = 1
+                else:
+                    words_count[bytes_tuple] += 1
+
+    return words_count
+
+def parallel_pre_tokenize_process(
+        filename: str | os.PathLike,
+        boundaries: list[int],
+        num_processes: int,
+        special_tokens: list[str] | None = None,
+) -> dict[tuple[bytes], int]:
+    """
+    Given the boundaries of the file, pre-tokenize it and return the words count.
+    """
+    # Prepare arguments as tuples
+    args_list = [
+        (filename, start, end, special_tokens)
+        for start, end in zip(boundaries[:-1], boundaries[1:])
+    ]
+    
+    # Run parallel pre_tokenize using starmap
+    with Pool(processes=num_processes) as pool:
+        results = pool.starmap(pre_tokenize, args_list)
+
+    # Merge the results
+    words_count = {}
+    for result in results:
+        for key, value in result.items():
+            if key not in words_count:
+                words_count[key] = value
+            else:
+                words_count[key] += value
+    return words_count
+
+def _pair_counts(seq: tuple[bytes]) -> Counter[tuple[bytes, bytes]]:
+    """
+    Return a Counter with how many times each adjacent-token pair appears
+    in `seq`.  Example: (a, b, c)  ->  {(a, b): 1, (b, c): 1}
+    """
+    return Counter(zip(seq, seq[1:]))  # zip truncates automatically when len < 2
+
+
+def _merge_once(tokens: tuple[bytes, ...],
+                pair: tuple[bytes, bytes]) -> tuple[bytes, ...]:
+    """
+    Greedily merge *non-overlapping* occurrences of `pair` in `tokens`.
+    Scans left-to-right, exactly like the standard BPE algorithm.
+    """
+    left, right = pair
+    merged = left + right
+
+    out: list[bytes] = []
+    i = 0
+    n = len(tokens)
+
+    while i < n:
+        # Check whether tokens[i:i+2] matches the pair to merge
+        if i < n - 1 and tokens[i] == left and tokens[i + 1] == right:
+            out.append(merged)
+            i += 2                      # skip over the right element
+        else:
+            out.append(tokens[i])
+            i += 1
+
+    return tuple(out)
+
+def merge_pair(
+    input_tuple: tuple[bytes, ...],
+    pair_to_merge: tuple[bytes, bytes],
+) -> tuple[tuple[bytes, ...], dict[tuple[bytes, bytes], int]]:
+    """
+    1.  Greedily merge every non-overlapping occurrence of `pair_to_merge`
+        inside `input_tuple` (BPE style) and return the new token sequence.
+
+    2.  Compute *diff = after_counts – before_counts* for every adjacent
+        token pair, so removed pairs have negative counts and new pairs have
+        positive counts.
+    """
+    # --- counts before the merge ---
+    before = _pair_counts(input_tuple)
+
+    # --- perform the merge ---
+    merged_tuple = _merge_once(input_tuple, pair_to_merge)
+
+    # --- counts after the merge ---
+    after = _pair_counts(merged_tuple)
+
+    # --- build the diff ---
+    diff: dict[tuple[bytes, bytes], int] = {}
+    for pair, cnt in before.items():
+        diff[pair] = diff.get(pair, 0) - cnt
+    for pair, cnt in after.items():
+        diff[pair] = diff.get(pair, 0) + cnt
+
+    # remove zero entries (optional; comment out if you want to keep them)
+    diff = {k: v for k, v in diff.items() if v != 0}
+
+    return merged_tuple, diff
+
 def run_train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -588,4 +719,68 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    raise NotImplementedError
+    vocab = {}
+    merges = []
+    num_processes = 8
+
+    # Initialize the vocab with the 256 bytes and the special tokens.
+    for special_token in special_tokens:
+        vocab[len(vocab)] = special_token.encode("utf-8")
+    for i in range(256):
+        vocab[len(vocab)] = bytes([i])
+
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(
+            f, num_processes, "<|endoftext|>".encode("utf-8"))
+        
+        words_count = parallel_pre_tokenize_process(
+            input_path, boundaries, num_processes, special_tokens)
+        
+        # Construct the words form. For example, if the word tuple ('a', 'b', 'c') will become ('a', 'bc') after
+        # the merge.
+        words_form = {}
+        for word, _ in words_count.items():
+            words_form[word] = word
+
+        # Construct the pairs count.
+        pairs_count = Counter()
+        pair_to_words: dict[tuple[bytes], set[tuple[bytes]]] = defaultdict(set)
+        for word, count in words_count.items():
+            pairs = zip(word, word[1:])
+            for pair in pairs: 
+                pairs_count[pair] += count
+                pair_to_words[pair].add(word)
+        
+        # Merge the most common pairs.
+        merge_count = vocab_size - len(vocab)
+        for i in range(merge_count):
+            
+            most_common_pair = max(
+                pairs_count.items(),
+                key=lambda x: (x[1], x[0])  # (count, pair) -- lex greater will win on ties
+            )
+            pair_to_merge = most_common_pair[0]
+            merges.append(pair_to_merge)
+            vocab[len(vocab)] = pair_to_merge[0] + pair_to_merge[1]
+            
+            # Update the words_count by merge the most common pair.
+            affected_words = list(pair_to_words[pair_to_merge])
+            for word in affected_words:
+                merged_tuple, diff = merge_pair(words_form[word], pair_to_merge)
+
+                # Update the pairs_count by the diff.
+                for pair, count in diff.items():
+                    pairs_count[pair] += count * words_count[word]
+                
+                    # Update pairs to words.
+                    pair_to_words[pair].add(word)
+
+                # Update the word_form
+                words_form[word] = merged_tuple
+
+            # Remove the merged pair from the pair_to_words.
+            assert pairs_count[pair_to_merge] == 0
+            del pairs_count[pair_to_merge]
+            del pair_to_words[pair_to_merge]
+
+    return (vocab, merges)
