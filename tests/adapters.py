@@ -4,7 +4,7 @@ from multiprocessing import Pool
 import os
 from pathlib import Path
 import regex as re
-from typing import IO, Any, BinaryIO
+from typing import IO, Any, BinaryIO, Iterator
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 from collections import Counter, defaultdict
@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 import numpy.typing as npt
 import torch
 from torch import Tensor
+
+import json
 
 from cs336_basics.pretokenization_example import find_chunk_boundaries
 
@@ -562,7 +564,128 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    raise NotImplementedError
+    class Tokenizer:
+        def __init__(
+                self,
+                vocab: dict[int, bytes],
+                merges: list[tuple[bytes, bytes]],
+                special_tokens: list[str] | None = None,
+        ):
+            self.vocab = vocab
+            self.merges = merges
+            self.special_tokens = special_tokens
+
+        @classmethod
+        def from_files(
+            cls,
+            vocab_filepath: str | os.PathLike,
+            merges_filepath: str | os.PathLike,
+            special_tokens: list[str] | None = None,
+        ) -> "Tokenizer":
+            vocab_path, merges_path = Path(vocab_filepath), Path(merges_filepath)
+
+            # load vocab (JSON is common, but adjust if your format differs)
+            with vocab_path.open(encoding="utf-8") as f:
+                vocab: dict[str, int] = json.load(f)
+
+            # load merges
+            merges: list[tuple[str, str]] = []
+            with merges_path.open(encoding="utf-8") as f:
+                for line in f:
+                    if not line:
+                        continue
+                    merges.append(tuple(line.split()))
+
+            return cls(vocab, merges, special_tokens)
+        
+
+        def get_parts(self, text: str) -> list[str]:
+            parts_1: list[str] = []
+            sorted_special_tokens = set()
+            if self.special_tokens is not None:
+                sorted_special_tokens = sorted(self.special_tokens, key=len, reverse=True)
+                pattern = re.compile("|".join(map(re.escape, sorted_special_tokens)))
+
+                # Split the text by special tokens.
+                last = 0
+                for m in pattern.finditer(text):
+                    if m.start() > last:          # preceding normal text
+                        parts_1.append(text[last:m.start()])
+                    parts_1.append(m.group(0))       # the special token itself
+                    last = m.end()
+                if last < len(text):               # tail normal text
+                    parts_1.append(text[last:])
+            else:
+                parts_1 = [text]
+
+            # Apply the regex
+            PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+            parts_2: list[str] = []
+            for part in parts_1:
+                if part in sorted_special_tokens:
+                    parts_2.append(part)
+                else:
+                    for m in re.finditer(PAT, part):
+                        parts_2.append(m.group())
+
+            return parts_2
+
+        def get_bpe_ranks(self) -> dict[tuple[bytes, bytes], int]:
+            return {pair: i for i, pair in enumerate(self.merges)}
+
+        def encode(self, text: str) -> list[int]:
+            vocab_dict = {v: k for k, v in self.vocab.items()}
+            special_tokens_set = {s.encode("utf-8") for s in (self.special_tokens or [])}
+            bpe_ranks = self.get_bpe_ranks()
+
+            def get_pairs(tokens: list[bytes]) -> set[tuple[bytes, bytes]]:
+                return set(zip(tokens, tokens[1:]))
+
+            parts = self.get_parts(text)
+            final_ids = []
+            for part in parts:
+                part_bytes = part.encode("utf-8")
+                if part_bytes in special_tokens_set:
+                    final_ids.append(vocab_dict[part_bytes])
+                    continue
+
+                tokens = [bytes([b]) for b in part_bytes]
+
+                while True:
+                    pairs = get_pairs(tokens)
+                    if not pairs:
+                        break
+
+                    best_pair = min(pairs, key=lambda p: bpe_ranks.get(p, float("inf")))
+                    if best_pair not in bpe_ranks:
+                        break
+
+                    # Merge the best pair
+                    i = 0
+                    new_tokens = []
+                    while i < len(tokens):
+                        if i < len(tokens) - 1 and tokens[i] == best_pair[0] and tokens[i+1] == best_pair[1]:
+                            new_tokens.append(tokens[i] + tokens[i+1])
+                            i += 2
+                        else:
+                            new_tokens.append(tokens[i])
+                            i += 1
+                    tokens = new_tokens
+
+                token_ids = [vocab_dict[token] for token in tokens]
+                final_ids.extend(token_ids)
+
+            return final_ids
+        
+        def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+            for text in iterable:
+                yield from self.encode(text)
+        
+        def decode(self, ids: list[int]) -> str:
+            joined = b''.join(self.vocab[i] for i in ids)
+            return joined.decode("utf-8", errors="replace")
+
+    return Tokenizer(vocab, merges, special_tokens)
 
 
 def pre_tokenize(
