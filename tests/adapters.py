@@ -35,8 +35,19 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
+    class MyLinear(torch.nn.Module):
+        def __init__(self, in_features, out_features, device=None, dtype=None):
+            super().__init__()
+            self.in_features = in_features
+            self.out_features = out_features
+            self.weight = torch.nn.Parameter(torch.randn(out_features, in_features))
 
-    raise NotImplementedError
+        def forward(self, x: Tensor) -> Tensor:
+            return x @ self.weight.T
+    
+    linear = MyLinear(d_in, d_out)
+    linear.weight.data = weights
+    return linear(in_features)
 
 
 def run_embedding(
