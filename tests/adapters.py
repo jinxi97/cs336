@@ -72,8 +72,21 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
+    class MyEmbedding(torch.nn.Module):
+        def __init__(self, num_embeddings, embedding_dim, device=None, dtype=None):
+            super().__init__()
+            self.num_embeddings = num_embeddings
+            self.embedding_dim = embedding_dim
+            self.weights = torch.empty(num_embeddings, embedding_dim)
+            std = math.sqrt(2.0 / (num_embeddings + embedding_dim))
+            torch.nn.init.trunc_normal_(self.weights, mean=0.0, std=std, a=-3*std, b=3*std)
 
-    raise NotImplementedError
+        def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+            return self.weights[token_ids]
+
+    embedding = MyEmbedding(vocab_size, d_model)
+    embedding.weights.data = weights
+    return embedding(token_ids)
 
 
 def run_swiglu(
