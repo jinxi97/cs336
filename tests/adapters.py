@@ -9,6 +9,7 @@ from typing import IO, Any, BinaryIO, Iterator
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 from collections import Counter, defaultdict
+from einops import einsum
 
 import numpy.typing as npt
 import torch
@@ -46,7 +47,7 @@ def run_linear(
             torch.nn.init.trunc_normal_(self.weight, mean=0.0, std=std, a=-3*std, b=3*std)
 
         def forward(self, x: Tensor) -> Tensor:
-            return x @ self.weight.T
+            return einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
     
     linear = MyLinear(d_in, d_out)
     linear.weight.data = weights
