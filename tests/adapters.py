@@ -413,7 +413,25 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    class MyRms(torch.nn.Module):
+        def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None):
+            super().__init__()
+            self.d_model = d_model
+            self.eps = eps
+            self.weights = torch.empty(d_model)
+        
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            root_mean_square = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + eps)
+            return (x/root_mean_square) * self.weights
+
+    
+    in_dtype = in_features.dtype
+    in_features = in_features.to(torch.float32)
+
+    rms = MyRms(d_model, eps)
+    rms.weights = weights
+    result = rms(in_features)
+    return result.to(in_dtype)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
