@@ -118,7 +118,16 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+
+    # (1) project twice
+    a = in_features @ w1_weight.T
+    b = in_features @ w3_weight.T
+
+    # (2) gate with SiLU, then elementwise product
+    hidden = a * torch.sigmoid(a) * b
+
+    # (3) project back
+    return hidden @ w2_weight.T
 
 
 def run_scaled_dot_product_attention(
