@@ -244,7 +244,38 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    class RotaryPositionalEmbedding(torch.nn.Module):
+        def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+            super().__init__()
+            self.theta = theta
+            self.d_k = d_k
+            self.max_seq_len = max_seq_len
+            self.device = device
+        
+        def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+            half = self.d_k // 2
+
+            k = torch.arange(1, half + 1, device=x.device, dtype=torch.float32)
+            exponent = (2.0 * k - 2) / self.d_k
+            inv_freq = 1.0 / (self.theta ** exponent)
+
+            angles = torch.einsum('...n,d->...nd', token_positions.float(), inv_freq)
+            sin, cos = torch.sin(angles), torch.cos(angles)
+
+            x1 = x[..., ::2]  # even dims: x_0, x_2, ...
+            x2 = x[..., 1::2] # odd dims: x_1, x_3, ...
+
+            x_rot_even = x1 * cos - x2 * sin
+            x_rot_odd  = x1 * sin + x2 * cos
+
+            # Step 8: Interleave even and odd dims back together
+            x_out = torch.empty_like(x)  # allocates a tensor same shape/dtype/device as x
+            x_out[..., ::2] = x_rot_even # fills even dims
+            x_out[..., 1::2] = x_rot_odd # fills odd dims
+            return x_out
+        
+    myrope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+    return myrope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
