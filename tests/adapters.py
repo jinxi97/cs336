@@ -148,7 +148,25 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    # Q.T * K
+    dividend = Q @ K.transpose(-1, -2)
+
+    # sqrt(d_k)
+    d_k = Q.shape[-1]
+    divisor = torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
+
+    # Apply the mask
+    quotient = dividend / divisor
+    if mask is not None:
+        quotient = quotient.masked_fill(~mask, float('-inf'))
+
+    # Softmax
+    sft_max = torch.softmax(quotient, dim=-1)
+
+    # Attention
+    attention = sft_max @ V
+    
+    return attention
 
 
 def run_multihead_self_attention(
