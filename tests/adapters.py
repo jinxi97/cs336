@@ -9,7 +9,7 @@ from typing import IO, Any, BinaryIO, Iterator
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 from collections import Counter, defaultdict
-from einops import einsum
+from einops import einsum, rearrange
 
 import numpy.typing as npt
 import torch
@@ -200,7 +200,30 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    Q = einsum(in_features, q_proj_weight, "... sequence_length d_in, d_k d_in -> ... sequence_length d_k")
+    K = einsum(in_features, k_proj_weight, "... sequence_length d_in, d_k d_in -> ... sequence_length d_k")
+    V = einsum(in_features, v_proj_weight, "... sequence_length d_in, d_v d_in -> ... sequence_length d_v")
+
+    # Split into heads
+    Q = rearrange(Q, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
+    K = rearrange(K, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
+    V = rearrange(V, "... sequence_length (h d_v) -> ... h sequence_length d_v", h = num_heads)
+
+    # Causal masking
+    sequence_length = in_features.size(-2)
+    mask = torch.triu(torch.ones(sequence_length, sequence_length, dtype=torch.bool), diagonal=1)
+    mask_allowed = ~mask
+
+    # Attention
+    attention = run_scaled_dot_product_attention(Q, K, V, mask_allowed)
+
+    # Concat
+    multi_head = rearrange(attention, "... h sequence_length d_v -> ... sequence_length (h d_v)")
+
+    # Output projection
+    output = einsum(multi_head, o_proj_weight, "... sequence_length d_v, d_model d_v -> ... sequence_length d_model")
+
+    return output
 
 
 def run_multihead_self_attention_with_rope(
@@ -240,7 +263,33 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    Q = einsum(in_features, q_proj_weight, "... sequence_length d_in, d_k d_in -> ... sequence_length d_k")
+    K = einsum(in_features, k_proj_weight, "... sequence_length d_in, d_k d_in -> ... sequence_length d_k")
+    V = einsum(in_features, v_proj_weight, "... sequence_length d_in, d_v d_in -> ... sequence_length d_v")
+
+    # Split into heads
+    Q = rearrange(Q, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
+    d_k = Q.size(-1)
+    Q = run_rope(d_k, theta, max_seq_len, Q, token_positions)
+    K = rearrange(K, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
+    K = run_rope(d_k, theta, max_seq_len, K, token_positions)
+    V = rearrange(V, "... sequence_length (h d_v) -> ... h sequence_length d_v", h = num_heads)
+
+    # Causal masking
+    sequence_length = in_features.size(-2)
+    mask = torch.triu(torch.ones(sequence_length, sequence_length, dtype=torch.bool), diagonal=1)
+    mask_allowed = ~mask
+
+    # Attention
+    attention = run_scaled_dot_product_attention(Q, K, V, mask_allowed)
+
+    # Concat
+    multi_head = rearrange(attention, "... h sequence_length d_v -> ... sequence_length (h d_v)")
+
+    # Output projection
+    output = einsum(multi_head, o_proj_weight, "... sequence_length d_v, d_model d_v -> ... sequence_length d_model")
+
+    return output
 
 
 def run_rope(
