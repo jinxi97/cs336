@@ -9,7 +9,7 @@ from typing import IO, Any, BinaryIO, Iterator
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 from collections import Counter, defaultdict
-from einops import einsum, rearrange
+from einops import einsum, rearrange, repeat
 
 import numpy.typing as npt
 import torch
@@ -267,6 +267,20 @@ def run_multihead_self_attention_with_rope(
     K = einsum(in_features, k_proj_weight, "... sequence_length d_in, d_k d_in -> ... sequence_length d_k")
     V = einsum(in_features, v_proj_weight, "... sequence_length d_in, d_v d_in -> ... sequence_length d_v")
 
+    # Default positions if not provided
+    if token_positions is None:
+        seq_len = Q.size(-2)  # Get sequence length from input tensor
+        token_positions = torch.arange(seq_len, device=Q.device)
+        
+        # If you need to match the batch dimensions and head dimensions:
+        # Expand to match all the batch dimensions except the last two (sequence_length, d_k)
+        for _ in range(Q.dim() - 2):
+            token_positions = token_positions.unsqueeze(0)
+        
+        # Expand to match batch size
+        batch_shape = Q.shape[:-2]  # All dimensions except seq_len and d_k
+        token_positions = token_positions.expand(*batch_shape, seq_len)
+
     # Split into heads
     Q = rearrange(Q, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
     d_k = Q.size(-1)
@@ -415,7 +429,20 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    # Multi Head Layer
+    normalized_x = run_rmsnorm(d_model, eps = 1e-5, weights=weights['ln1.weight'], in_features=in_features)
+    multihead_attention = run_multihead_self_attention_with_rope(
+        d_model, num_heads, max_seq_len, theta, weights['attn.q_proj.weight'], 
+        weights['attn.k_proj.weight'], weights['attn.v_proj.weight'], weights['attn.output_proj.weight'],
+        normalized_x)
+    residual_result = in_features + multihead_attention
+
+    # Feedforward Layer
+    normalized_x_2 = run_rmsnorm(d_model, eps = 1e-5, weights=weights['ln2.weight'], in_features=residual_result)
+    feed_forward = run_swiglu(d_model, d_ff, weights['ffn.w1.weight'], weights['ffn.w2.weight'],
+        weights['ffn.w3.weight'], normalized_x_2)
+    residual_result_2 = residual_result + feed_forward
+    return residual_result_2
 
 
 def run_transformer_lm(
