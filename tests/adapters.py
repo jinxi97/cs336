@@ -269,16 +269,11 @@ def run_multihead_self_attention_with_rope(
 
     # Default positions if not provided
     if token_positions is None:
-        seq_len = Q.size(-2)  # Get sequence length from input tensor
-        token_positions = torch.arange(seq_len, device=Q.device)
-        
-        # If you need to match the batch dimensions and head dimensions:
-        # Expand to match all the batch dimensions except the last two (sequence_length, d_k)
-        for _ in range(Q.dim() - 2):
-            token_positions = token_positions.unsqueeze(0)
+        seq_len = in_features.size(-2)  # Get sequence length from input tensor
+        token_positions = torch.arange(seq_len)
         
         # Expand to match batch size
-        batch_shape = Q.shape[:-2]  # All dimensions except seq_len and d_k
+        batch_shape = in_features.shape[:-2]  # All dimensions except seq_len and d_in
         token_positions = token_positions.expand(*batch_shape, seq_len)
 
     # Split into heads
