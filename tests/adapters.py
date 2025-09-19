@@ -519,7 +519,36 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    def weights_by_layer(layer_number: int) -> dict[str, Tensor]:
+        return {
+            'attn.q_proj.weight': weights[f"layers.{layer_number}.attn.q_proj.weight"],
+            'attn.k_proj.weight': weights[f"layers.{layer_number}.attn.k_proj.weight"],
+            'attn.v_proj.weight': weights[f"layers.{layer_number}.attn.v_proj.weight"],
+            'attn.output_proj.weight': weights[f"layers.{layer_number}.attn.output_proj.weight"],
+            'ln1.weight': weights[f"layers.{layer_number}.ln1.weight"],
+            'ffn.w1.weight': weights[f"layers.{layer_number}.ffn.w1.weight"],
+            'ffn.w2.weight': weights[f"layers.{layer_number}.ffn.w2.weight"],
+            'ffn.w3.weight': weights[f"layers.{layer_number}.ffn.w3.weight"],
+            'ln2.weight': weights[f"layers.{layer_number}.ln2.weight"],
+        }
+
+    # Token Embedding
+    embedding = run_embedding(vocab_size, d_model, weights['token_embeddings.weight'], in_indices)
+
+    # Transformer Blocks
+    last_layer = embedding
+    current_layer = last_layer
+    for i in range(num_layers):
+        current_layer = run_transformer_block(d_model, num_heads, d_ff, context_length, rope_theta, weights_by_layer(i), last_layer)
+        last_layer = current_layer
+    
+    # Normalization
+    normalized = run_rmsnorm(d_model, eps = 1e-5, weights=weights['ln_final.weight'], in_features=current_layer)
+
+    # Ourput Embedding
+    output_embedding = run_linear(d_in=d_model, d_out=vocab_size, weights=weights["lm_head.weight"], in_features=normalized)
+
+    return output_embedding
 
 
 def run_rmsnorm(
