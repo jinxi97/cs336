@@ -9,11 +9,12 @@ from typing import IO, Any, BinaryIO, Iterator
 from collections.abc import Iterable
 from jaxtyping import Float, Int
 from collections import Counter, defaultdict
-from einops import einsum, rearrange, repeat
+from einops import einsum, rearrange, reduce
 
 import numpy.typing as npt
 import torch
 from torch import Tensor
+import torch.nn.functional as F
 
 import json
 
@@ -667,7 +668,22 @@ def run_cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: 
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    # Numerically stable log-softmax
+    max_scores = reduce(inputs, "batch_size vocab_size -> batch_size 1", "max")
+    exps = torch.exp(inputs - max_scores)
+    sum_exps = reduce(exps, "batch_size vocab_size -> batch_size 1", "sum")
+    log_probs = (inputs - max_scores) - torch.log(sum_exps)
+
+    # Negative log likelihood loss
+    batch_size = inputs.shape[0]
+
+    # Select the log probability of the correct class for each example
+    correct_log_probs = log_probs[torch.arange(batch_size), targets]
+    
+    # Compute the average negative log likelihood
+    loss = -reduce(correct_log_probs, "batch_size -> ()", "mean")
+    
+    return loss
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
