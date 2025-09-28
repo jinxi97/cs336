@@ -627,7 +627,18 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    # Generate random starting indices for each sequence in the batch
+    ix = torch.randint(len(dataset) - context_length, (batch_size,))
+    
+    # Create the input sequences (x) and target sequences (y)
+    # y is x shifted by one token to the right
+    x = torch.stack([torch.from_numpy(dataset[i:i+context_length].astype("int64")) for i in ix])
+    y = torch.stack([torch.from_numpy(dataset[i+1:i+context_length+1].astype("int64")) for i in ix])
+    
+    # Move tensors to the specified device
+    x, y = x.to(device), y.to(device)
+    
+    return x, y
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
