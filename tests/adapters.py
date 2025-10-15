@@ -15,6 +15,7 @@ import numpy.typing as npt
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+from torch.nn.utils import parameters_to_vector
 
 import json
 
@@ -697,7 +698,10 @@ def run_cross_entropy(inputs: Float[Tensor, " batch_size vocab_size"], targets: 
     return loss
 
 
-def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+def run_gradient_clipping(
+      parameters: Iterable[torch.nn.Parameter], 
+      max_l2_norm: float
+    ) -> None:
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
 
     Args:
@@ -706,7 +710,22 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
+    def grad_l2_norm_fast(params: Iterable[torch.nn.Parameter]) -> float:
+        grads = [p.grad.detach() for p in params if p.grad is not None]
+        if not grads:
+            return 0.0
+        v = parameters_to_vector(grads).float()
+        return v.norm(2).item()
+    norm = grad_l2_norm_fast(parameters)
+    if norm < max_l2_norm:
+        return
+    eps = 1e-6
+    scale = max_l2_norm / (norm + eps)
+    
+    # Apply scaling in-place
+    for p in parameters:
+        if p.grad is not None:
+            p.grad.mul_(scale)
 
 
 def get_adamw_cls() -> type[torch.optim.Optimizer]:
@@ -836,7 +855,12 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'iteration': iteration,
+    }
+    torch.save(checkpoint, out)
 
 
 def run_load_checkpoint(
@@ -857,7 +881,10 @@ def run_load_checkpoint(
     Returns:
         int: the previously-serialized number of iterations.
     """
-    raise NotImplementedError
+    checkpoint = torch.load(src)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    return checkpoint['iteration']
 
 
 def get_tokenizer(
