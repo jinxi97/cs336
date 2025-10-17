@@ -209,6 +209,8 @@ def estimate_loss(weights, vocab_size, tokenized_val_data, device):
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
+    # Ensure tensors created without explicit device (e.g., inside adapters) default to our chosen device
+    torch.set_default_device(device)
 
     # --- Tokenizer and Data Loading ---
     tokenizer = load_bpe_tokenizer("ts_vocab.json", "ts_merges.txt")
