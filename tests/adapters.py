@@ -274,9 +274,9 @@ def run_multihead_self_attention_with_rope(
         seq_len = in_features.size(-2)  # Get sequence length from input tensor
         token_positions = torch.arange(seq_len)
         
-        # Expand to match batch size
+        # Expand to match batch size and add a singleton head dim for broadcasting
         batch_shape = in_features.shape[:-2]  # All dimensions except seq_len and d_in
-        token_positions = token_positions.expand(*batch_shape, seq_len)
+        token_positions = token_positions.expand(*batch_shape, 1, seq_len)
 
     # Split into heads
     Q = rearrange(Q, "... sequence_length (h d_k) -> ... h sequence_length d_k", h = num_heads)
