@@ -78,15 +78,58 @@ def initialize_weights(vocab_size, num_layers, d_model, d_ff, device):
 class WeightsModule(torch.nn.Module):
     def __init__(self, weights_dict: dict[str, torch.Tensor]):
         super().__init__()
-        # Store all weights inside a ParameterDict for easy checkpointing
+        # Sanitize parameter names (PyTorch forbids '.' in parameter names)
+        self._orig_to_sanitized: dict[str, str] = {}
+        self._sanitized_to_orig: dict[str, str] = {}
+
+        def _sanitize(name: str) -> str:
+            return name.replace('.', '__DOT__')
+
+        sanitized_pairs = []
+        for orig_key, tensor in weights_dict.items():
+            sanitized_key = _sanitize(orig_key)
+            self._orig_to_sanitized[orig_key] = sanitized_key
+            self._sanitized_to_orig[sanitized_key] = orig_key
+            sanitized_pairs.append((sanitized_key, tensor))
+
+        # Store all weights inside a ParameterDict for easy checkpointing, using sanitized keys
         self.params = torch.nn.ParameterDict({
-            k: torch.nn.Parameter(v.detach().clone()) for k, v in weights_dict.items()
+            k: torch.nn.Parameter(v.detach().clone()) for k, v in sanitized_pairs
         })
 
     def state_dict(self, *args, **kwargs):
-        # Expose parameters under their original keys
+        # Expose parameters under their original keys for serialization
         base = super().state_dict(*args, **kwargs)
-        return base
+        remapped: dict[str, torch.Tensor] = {}
+        for k, v in base.items():
+            if k.startswith('params.'):
+                sanitized = k.split('params.', 1)[1]
+                orig = self._sanitized_to_orig.get(sanitized, sanitized)
+                remapped[f'params.{orig}'] = v
+            else:
+                remapped[k] = v
+        return remapped
+
+    def load_state_dict(self, state_dict, strict: bool = True):
+        # Accept state dicts saved with original keys by remapping to sanitized
+        mapped: dict[str, torch.Tensor] = {}
+        for k, v in state_dict.items():
+            if isinstance(k, str) and k.startswith('params.'):
+                name = k.split('params.', 1)[1]
+                # Prefer explicit mapping if present
+                if name in self._orig_to_sanitized:
+                    mapped[f'params.{self._orig_to_sanitized[name]}'] = v
+                else:
+                    # Fallback: if already sanitized or unknown, sanitize deterministically
+                    sanitized = name.replace('.', '__DOT__')
+                    mapped[f'params.{sanitized}'] = v
+            else:
+                mapped[k] = v
+        return super().load_state_dict(mapped, strict=strict)
+
+    def by_original_keys(self) -> dict[str, torch.Tensor]:
+        # Convenience view: original key -> Parameter tensor
+        return {orig: self.params[sanitized] for orig, sanitized in self._orig_to_sanitized.items()}
 
 _POOL_TOKENIZER = None
 
@@ -242,7 +285,7 @@ def main():
         # Forward pass
         logits = run_transformer_lm(
             vocab_size, CONTEXT_LENGTH, D_MODEL, NUM_LAYERS, NUM_HEADS, D_FF, ROPE_THETA,
-            weights_module.params, x
+            weights_module.by_original_keys(), x
         )
         logits_flat = logits.view(-1, vocab_size)
         targets_flat = y.view(-1)
@@ -255,7 +298,7 @@ def main():
         optimizer.step()
 
         if step % VALIDATION_INTERVAL == 0 or step == TOTAL_STEP_COUNT - 1:
-            val_loss = estimate_loss(weights_module.params, vocab_size, tokenized_val_data, device)
+            val_loss = estimate_loss(weights_module.by_original_keys(), vocab_size, tokenized_val_data, device)
             end_time = time.time()
             print(f"Step {step:4d}/{TOTAL_STEP_COUNT}: Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f}, LR: {lr:.6f}, Time: {(end_time-start_time)*1000:.2f}ms")
             start_time = time.time()
