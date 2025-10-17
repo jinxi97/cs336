@@ -18,6 +18,8 @@ from tests.adapters import (
     run_cross_entropy,
     run_gradient_clipping,
     run_transformer_lm,
+    run_save_checkpoint,
+    run_load_checkpoint,
 )
 
 # --- Hyperparameters ---
@@ -72,6 +74,19 @@ def initialize_weights(vocab_size, num_layers, d_model, d_ff, device):
         
     return weights
 
+
+class WeightsModule(torch.nn.Module):
+    def __init__(self, weights_dict: dict[str, torch.Tensor]):
+        super().__init__()
+        # Store all weights inside a ParameterDict for easy checkpointing
+        self.params = torch.nn.ParameterDict({
+            k: torch.nn.Parameter(v.detach().clone()) for k, v in weights_dict.items()
+        })
+
+    def state_dict(self, *args, **kwargs):
+        # Expose parameters under their original keys
+        base = super().state_dict(*args, **kwargs)
+        return base
 
 _POOL_TOKENIZER = None
 
@@ -195,16 +210,28 @@ def main():
     # --- Model and Optimizer Initialization ---
     torch.manual_seed(1337)
     weights = initialize_weights(vocab_size, NUM_LAYERS, D_MODEL, D_FF, device)
+    # Wrap weights for checkpointing
+    weights_module = WeightsModule(weights)
     
     AdamW = get_adamw_cls()
     # Deduplicate params: weight tying means lm_head.weight and token_embeddings.weight are identical
-    unique_params = list({id(p): p for p in weights.values()}.values())
+    unique_params = list({id(p): p for p in weights_module.parameters()}.values())
     optimizer = AdamW(unique_params, lr=MAX_LEARNING_RATE, weight_decay=WEIGHT_DECAY, betas=(BETA1, BETA2))
 
     # --- Training Loop ---
     print("\n--- Starting Training ---")
+    # Attempt resume
+    start_iteration = 0
+    checkpoint_path = Path("checkpoint.pt")
+    if checkpoint_path.exists():
+        try:
+            start_iteration = run_load_checkpoint(str(checkpoint_path), weights_module, optimizer)
+            print(f"Resumed from checkpoint at iteration {start_iteration}")
+        except Exception as e:
+            print(f"Warning: failed to load checkpoint: {e}")
+
     start_time = time.time()
-    for step in range(TOTAL_STEP_COUNT):
+    for step in range(start_iteration, TOTAL_STEP_COUNT):
         print(f"Step: {step}")
         lr = run_get_lr_cosine_schedule(step, MAX_LEARNING_RATE, MIN_LEARNING_RATE, WARMUP_ITERS, COSINE_CYCLE_ITERS)
         for param_group in optimizer.param_groups:
@@ -214,7 +241,8 @@ def main():
 
         # Forward pass
         logits = run_transformer_lm(
-            vocab_size, CONTEXT_LENGTH, D_MODEL, NUM_LAYERS, NUM_HEADS, D_FF, ROPE_THETA, weights, x
+            vocab_size, CONTEXT_LENGTH, D_MODEL, NUM_LAYERS, NUM_HEADS, D_FF, ROPE_THETA,
+            weights_module.params, x
         )
         logits_flat = logits.view(-1, vocab_size)
         targets_flat = y.view(-1)
@@ -227,10 +255,15 @@ def main():
         optimizer.step()
 
         if step % VALIDATION_INTERVAL == 0 or step == TOTAL_STEP_COUNT - 1:
-            val_loss = estimate_loss(weights, vocab_size, tokenized_val_data, device)
+            val_loss = estimate_loss(weights_module.params, vocab_size, tokenized_val_data, device)
             end_time = time.time()
             print(f"Step {step:4d}/{TOTAL_STEP_COUNT}: Train Loss: {loss.item():.4f}, Val Loss: {val_loss:.4f}, LR: {lr:.6f}, Time: {(end_time-start_time)*1000:.2f}ms")
             start_time = time.time()
+
+        # Periodic checkpoint
+        if (step + 1) % 1000 == 0 or step == TOTAL_STEP_COUNT - 1:
+            run_save_checkpoint(weights_module, optimizer, step + 1, str(checkpoint_path))
+            print(f"Checkpoint saved at iteration {step + 1}")
 
 if __name__ == "__main__":
     main()
